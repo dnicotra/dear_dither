@@ -96,6 +96,15 @@ target_link_libraries(${APP_NAME} PRIVATE
     rlimgui_lib
 )
 
+# ─── Copy assets next to executable (native builds) ───────────────────────
+if(NOT EMSCRIPTEN)
+    add_custom_command(TARGET ${APP_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:${APP_NAME}>/assets"
+    )
+endif()
+
 # ─── Emscripten / Web build ────────────────────────────────────────────────────
 if(EMSCRIPTEN)
     # Emit APP_NAME.html (+ .js + .wasm) instead of a bare binary.

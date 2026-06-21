@@ -1,18 +1,25 @@
 #pragma once
 #include "raylib.h"
+#include <vector>
 
-// All mutable state for the demo. Replace these fields with your own.
+struct ShaderPass {
+    Shader      shader  = {};
+    const char* name    = "";
+    bool        enabled = true;
+};
+
 struct AppState {
-    Color  clearColor   = {18, 18, 22, 255};
-    Color  shapeColor   = {80, 160, 255, 255};
-    float  speed        = 120.0f;   // px / second
-    float  radius       = 60.0f;
-    bool   paused       = false;
-    bool   showImGuiDemo = false;
+    bool showImGuiDemo = false;
 
-    // Bouncing-shape simulation.
-    Vector2 pos = {200.0f, 200.0f};
-    Vector2 vel = {1.0f, 1.0f};      // unit direction, scaled by speed
+    Image     img;
+    Texture2D tex = {};
+
+    std::vector<ShaderPass> passes;
+    RenderTexture           pingpong[2] = {};
+
+    float exposure = 0.0f;
+    float contrast = 1.0f;
+    float gamma    = 1.0f;
 };
 
 class App {
@@ -20,16 +27,18 @@ public:
     App();
     ~App();
 
-    void Frame();             // one full frame: input -> update -> draw scene -> draw GUI
+    void Frame();
     bool ShouldClose() const;
 
 private:
-    void HandleEvents();      // platform input + web resize detection
-    void Update();            // advance the simulation
-    void DrawScene();         // raylib drawing
-    void DrawGui();           // Dear ImGui windows
+    void HandleEvents();
+    void Update();
+    void DrawScene();
+    void DrawGui();
+
+    int AddPass(const char* fragPath, const char* name);
 
     AppState state;
-    int   lastW = 0, lastH = 0; // last known canvas size; used to detect resize on web
-    float dpiScale = 1.0f;      // device pixel ratio; > 1 on HiDPI web builds
+    int   lastW = 0, lastH = 0;
+    float dpiScale = 1.0f;
 };

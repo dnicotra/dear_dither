@@ -4,6 +4,31 @@
 #include "imgui.h"
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
+#include "rlgl.h"
+
+static RenderTexture LoadRenderTextureFloat(int w, int h)
+{
+    RenderTexture rt = { 0 };
+    rt.id = rlLoadFramebuffer();
+    if (rt.id > 0) {
+        rlEnableFramebuffer(rt.id);
+        rt.texture.id      = rlLoadTexture(nullptr, w, h, PIXELFORMAT_UNCOMPRESSED_R32G32B32A32, 1);
+        rt.texture.width   = w;
+        rt.texture.height  = h;
+        rt.texture.format  = PIXELFORMAT_UNCOMPRESSED_R32G32B32A32;
+        rt.texture.mipmaps = 1;
+        rt.depth.id        = rlLoadTextureDepth(w, h, true);
+        rt.depth.width     = w;
+        rt.depth.height    = h;
+        rt.depth.format    = 19;
+        rt.depth.mipmaps   = 1;
+        rlFramebufferAttach(rt.id, rt.texture.id, RL_ATTACHMENT_COLOR_CHANNEL0, RL_ATTACHMENT_TEXTURE2D, 0);
+        rlFramebufferAttach(rt.id, rt.depth.id, RL_ATTACHMENT_DEPTH, RL_ATTACHMENT_RENDERBUFFER, 0);
+        rlDisableFramebuffer();
+    }
+    return rt;
+}
 
 // ─── Web (Emscripten) interop ──────────────────────────────────────────────────
 // The HTML shell owns a #canvas-container that flexes to fill the page; the
@@ -51,8 +76,15 @@ App::App()
 #endif
     SetTraceLogLevel(LOG_WARNING); // quiet raylib's INFO spam
     InitWindow(w, h, "dear_raylib");
+    ChangeDirectory(GetApplicationDirectory());
     SetExitKey(KEY_NULL);          // don't let ESC close the window
     SetTargetFPS(60);
+    state.img = LoadImage("assets/img.png");
+    state.tex = LoadTextureFromImage(state.img);
+    state.pingpong[0] = LoadRenderTextureFloat(state.tex.width, state.tex.height);
+    state.pingpong[1] = LoadRenderTextureFloat(state.tex.width, state.tex.height);
+
+    AddPass("assets/shaders/passthrough.fs", "Passthrough");
 
 #ifdef __EMSCRIPTEN__
     // Pin the CSS display size to logical pixels; the framebuffer is already physical.
@@ -70,7 +102,6 @@ App::App()
 
     lastW = SW();
     lastH = SH();
-    state.pos = { SW() * 0.5f, SH() * 0.5f };
 
     // Anything printed to stdout/stderr shows up in the web console pane.
     printf("dear_raylib started: %d x %d (dpi scale %.2f)\n", SW(), SH(), dpiScale);
@@ -80,6 +111,11 @@ App::App()
 App::~App()
 {
     rlImGuiShutdown();
+    for (auto& p : state.passes) UnloadShader(p.shader);
+    UnloadRenderTexture(state.pingpong[0]);
+    UnloadRenderTexture(state.pingpong[1]);
+    UnloadTexture(state.tex);
+    UnloadImage(state.img);
     CloseWindow();
 }
 
@@ -94,9 +130,6 @@ void App::HandleEvents()
 {
     if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_Q))
         CloseWindow();
-
-    if (IsKeyPressed(KEY_SPACE))
-        state.paused = !state.paused;
 
 #ifdef __EMSCRIPTEN__
     // Detect canvas buffer resizes (e.g. browser window resize). canvas_buf_*
@@ -116,29 +149,66 @@ void App::HandleEvents()
 
 void App::Update()
 {
-    if (state.paused) return;
-
-    float dt = GetFrameTime();
-    state.pos.x += state.vel.x * state.speed * dt;
-    state.pos.y += state.vel.y * state.speed * dt;
-
-    // Bounce off the window edges.
-    if (state.pos.x - state.radius < 0)        { state.pos.x = state.radius;            state.vel.x =  fabsf(state.vel.x); }
-    if (state.pos.x + state.radius > SW())      { state.pos.x = SW() - state.radius;      state.vel.x = -fabsf(state.vel.x); }
-    if (state.pos.y - state.radius < 0)        { state.pos.y = state.radius;            state.vel.y =  fabsf(state.vel.y); }
-    if (state.pos.y + state.radius > SH())      { state.pos.y = SH() - state.radius;      state.vel.y = -fabsf(state.vel.y); }
+    Shader s = state.passes[0].shader;
+    SetShaderValue(s, GetShaderLocation(s, "exposure"), &state.exposure, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(s, GetShaderLocation(s, "contrast"), &state.contrast, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(s, GetShaderLocation(s, "gamma"),    &state.gamma,    SHADER_UNIFORM_FLOAT);
 }
 
 // ─── Drawing ─────────────────────────────────────────────────────────────────
 
+int App::AddPass(const char* fragPath, const char* name)
+{
+    state.passes.push_back({ LoadShader(0, fragPath), name, true });
+    return (int)state.passes.size() - 1;
+}
+
 void App::DrawScene()
 {
-    DrawCircleV(state.pos, state.radius, state.shapeColor);
+    float tw = (float)state.tex.width;
+    float th = (float)state.tex.height;
 
-    const char* msg = "raylib + Dear ImGui template";
-    int fontSize = 20;
-    int tw = MeasureText(msg, fontSize);
-    DrawText(msg, (SW() - tw) / 2, SH() - 40, fontSize, Fade(WHITE, 0.6f));
+    // Run enabled passes: ping-pong between two render textures.
+    int dst = 0;
+    int ran = 0;
+    for (auto& pass : state.passes) {
+        if (!pass.enabled) continue;
+
+        BeginTextureMode(state.pingpong[dst]);
+        ClearBackground(BLACK);
+        BeginShaderMode(pass.shader);
+
+        if (ran == 0) {
+            DrawTexture(state.tex, 0, 0, WHITE);
+        } else {
+            int src = 1 - dst;
+            DrawTexturePro(state.pingpong[src].texture,
+                {0, 0, tw, -th}, {0, 0, tw, th},
+                {0, 0}, 0.0f, WHITE);
+        }
+
+        EndShaderMode();
+        EndTextureMode();
+        dst = 1 - dst;
+        ran++;
+    }
+
+    // Blit result to screen, scaled to fit.
+    float sw = (float)SW(), sh = (float)SH();
+    float scale = fminf(sw / tw, sh / th);
+    float dw = tw * scale, dh = th * scale;
+    Rectangle destRect = {(sw - dw) * 0.5f, (sh - dh) * 0.5f, dw, dh};
+
+    if (ran == 0) {
+        DrawTexturePro(state.tex,
+            {0, 0, tw, th}, destRect,
+            {0, 0}, 0.0f, WHITE);
+    } else {
+        int last = 1 - dst;
+        DrawTexturePro(state.pingpong[last].texture,
+            {0, 0, tw, -th}, destRect,
+            {0, 0}, 0.0f, WHITE);
+    }
 }
 
 void App::DrawGui()
@@ -159,21 +229,11 @@ void App::DrawGui()
 
     ImGui::Separator();
 
-    ImGui::Checkbox("Paused (space)", &state.paused);
-    ImGui::SliderFloat("Speed", &state.speed, 0.0f, 600.0f, "%.0f px/s");
-    ImGui::SliderFloat("Radius", &state.radius, 5.0f, 200.0f, "%.0f px");
-
-    float shape[4] = { state.shapeColor.r / 255.0f, state.shapeColor.g / 255.0f,
-                       state.shapeColor.b / 255.0f, state.shapeColor.a / 255.0f };
-    if (ImGui::ColorEdit4("Shape", shape)) {
-        state.shapeColor = { (unsigned char)(shape[0] * 255), (unsigned char)(shape[1] * 255),
-                             (unsigned char)(shape[2] * 255), (unsigned char)(shape[3] * 255) };
-    }
-
-    float bg[3] = { state.clearColor.r / 255.0f, state.clearColor.g / 255.0f, state.clearColor.b / 255.0f };
-    if (ImGui::ColorEdit3("Background", bg)) {
-        state.clearColor = { (unsigned char)(bg[0] * 255), (unsigned char)(bg[1] * 255),
-                             (unsigned char)(bg[2] * 255), 255 };
+    ImGui::Checkbox("Passthrough", &state.passes[0].enabled);
+    if (state.passes[0].enabled) {
+        ImGui::SliderFloat("Exposure", &state.exposure, -5.0f, 5.0f);
+        ImGui::SliderFloat("Contrast", &state.contrast,  0.0f, 3.0f);
+        ImGui::SliderFloat("Gamma",    &state.gamma,     0.1f, 5.0f);
     }
 
     ImGui::Separator();
@@ -194,7 +254,7 @@ void App::Frame()
     Update();
 
     BeginDrawing();
-    ClearBackground(state.clearColor);
+    ClearBackground(BLACK);
 
     DrawScene();
 
